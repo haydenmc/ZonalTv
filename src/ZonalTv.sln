@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ZonalTv", "ZonalTv\ZonalTv.csproj", "{88F696BF-51D9-401B-B79D-C8623DEF2EF0}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ZonalTv.Test", "ZonalTv.Test\ZonalTv.Test.csproj", "{482A0EC6-197A-422C-B4FE-AE2A7C43C54E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{88F696BF-51D9-401B-B79D-C8623DEF2EF0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{88F696BF-51D9-401B-B79D-C8623DEF2EF0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{88F696BF-51D9-401B-B79D-C8623DEF2EF0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{88F696BF-51D9-401B-B79D-C8623DEF2EF0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{482A0EC6-197A-422C-B4FE-AE2A7C43C54E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{482A0EC6-197A-422C-B4FE-AE2A7C43C54E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{482A0EC6-197A-422C-B4FE-AE2A7C43C54E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{482A0EC6-197A-422C-B4FE-AE2A7C43C54E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
