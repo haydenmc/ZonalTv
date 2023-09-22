@@ -1,0 +1,11 @@
+@model RegisterModel
+@{
+    ViewData["Title"] = "Register";
+}
+
+<form asp-controller="Account" asp-action="Register" method="post">
+    <input asp-for="Username" placeholder="User Name" />
+    <input type="email" asp-for="Email" placeholder="e-mail address" />
+    <input type="password" asp-for="Password" placeholder="Password" />
+    <button type="submit">Register</button>
+</form>
