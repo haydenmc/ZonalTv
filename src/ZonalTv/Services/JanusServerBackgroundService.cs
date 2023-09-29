@@ -14,6 +14,7 @@ public class JanusServerSettings
 
 public class JanusServerBackgroundService : BackgroundService
 {
+    private static readonly TimeSpan JANUS_KEEPALIVE_MESSAGE_INTERVAL = new(0, 0, 5);
 
     private readonly ILogger<JanusServerBackgroundService> _logger;
 
@@ -35,58 +36,46 @@ public class JanusServerBackgroundService : BackgroundService
     {
         while (true)
         {
+            using ClientWebSocket ws = new();
             try
             {
-                // Open connection
-                _logger.LogInformation("Connecting to Janus at {}...",
-                    _options.Value.WebsocketUri.ToString());
-                using ClientWebSocket ws = new();
-                ws.Options.AddSubProtocol("janus-protocol");
-                await ws.ConnectAsync(_options.Value.WebsocketUri, cancellationToken);
-
-                // Get a session id
-                _logger.LogInformation("Connected to Janus");
-                var infoRequest = new JanusMessage()
-                {
-                    Command = "create"
-                };
-                await ws.SendJsonAsync(infoRequest, cancellationToken);
-                var infoResponse = await ws.ReadJsonAndDeserializeAsync<JanusCreateResponse>(
+                var sessionId = await ConnectToJanusAsync(ws, _options.Value.WebsocketUri,
                     cancellationToken);
-                if ((infoResponse == null) ||
-                    (infoResponse.TransactionId != infoRequest.TransactionId))
-                {
-                    _logger.LogError("Invalid response when requesting Janus session ID.");
-                    continue;
-                }
-                var sessionId = infoResponse.Data.Id;
-                _logger.LogInformation("Received Janus session ID '{}'.", sessionId);
-
                 while (true)
                 {
-                    // Wait for incoming commands, or fire a keep alive every 5 seconds.
-                    var readCancellationSource = 
+                    // Start processing incoming messages, queued tasks, and sending
+                    // keepalive messages
+                    var messageLoopCancellationSource = 
                         CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    var readTask = _taskQueue.Reader.ReadAsync(
-                        readCancellationSource.Token).AsTask();
-                    if (await Task.WhenAny(readTask, Task.Delay(5000, CancellationToken.None))
-                        == readTask)
+                    await Task.WhenAny(
+                        ReadIncomingJanusMessagesAsync(ws, messageLoopCancellationSource.Token),
+                        SendKeepAliveMessagesAsync(ws, sessionId,
+                            messageLoopCancellationSource.Token),
+                        ProcessTaskQueueAsync(messageLoopCancellationSource.Token));
+
+                    // We don't expect to get here unless one of the above tasks exits
+                    // prematurely. Cancel the rest of them and let the loop continue.
+                    await messageLoopCancellationSource.CancelAsync();
+                    _logger.LogError("Janus processing loop interrupted unexpectedly");
+                }
+            }
+            catch (OperationCanceledException e)
+            {
+                _logger.LogInformation("Shutting down Janus connection...");
+
+                // Try to gracefully close the websocket if it's still open
+                try
+                {
+                    if (ws.State == WebSocketState.Open)
                     {
-                        await (await readTask).Invoke();
+                        CancellationTokenSource exitCancellationTokenSource = new(5000);
+                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Exit requested",
+                            exitCancellationTokenSource.Token);
                     }
-                    else
-                    {
-                        readCancellationSource.Cancel();
-                        // Send keepalive message
-                        var keepAliveMessage = new JanusSessionMessage()
-                        {
-                            Command = "keepalive",
-                            SessionId = sessionId,
-                        };
-                        _logger.LogInformation("Sending Janus keepalive for session ID '{}'...",
-                            sessionId);
-                        await ws.SendJsonAsync(keepAliveMessage, cancellationToken);
-                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    _logger.LogError("Timed out attempting to close Janus websocket connection.");
                 }
             }
             catch (Exception e)
@@ -98,6 +87,79 @@ public class JanusServerBackgroundService : BackgroundService
         }
     }
 
+    private async Task<long> ConnectToJanusAsync(ClientWebSocket webSocket, Uri webSocketUri,
+        CancellationToken cancellationToken)
+    {
+        // Open connection
+        _logger.LogInformation("Connecting to Janus at {}...", webSocketUri.ToString());
+        webSocket.Options.AddSubProtocol("janus-protocol");
+        await webSocket.ConnectAsync(webSocketUri, cancellationToken);
+
+        // Get a session id
+        _logger.LogInformation("Connected to Janus, creating session...");
+        var infoRequest = new JanusMessage()
+        {
+            Command = "create"
+        };
+        await webSocket.SendJsonAsync(infoRequest, cancellationToken);
+        var infoResponse = await webSocket.ReadJsonAndDeserializeAsync<JanusCreateMessage>(
+            cancellationToken);
+        if ((infoResponse == null) ||
+            (infoResponse.TransactionId != infoRequest.TransactionId))
+        {
+            _logger.LogError("Invalid response when requesting Janus session ID.");
+            throw new ApplicationException("Invalid response when requesting Janus session ID.");
+        }
+        var sessionId = infoResponse.Data.Id;
+        _logger.LogInformation("Received Janus session ID '{}'.", sessionId);
+        return sessionId;
+    }
+
+    private async Task ReadIncomingJanusMessagesAsync(ClientWebSocket webSocket,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var message = 
+                await webSocket.ReadJsonAndDeserializeAsync<JanusMessage>(cancellationToken);
+            if (message != null)
+            {
+                _logger.LogInformation("Received {} message from Janus", message.GetType().Name);
+            }
+        }
+    }
+
+    private async Task SendKeepAliveMessagesAsync(ClientWebSocket webSocket, long sessionId,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            // Send keepalive message on a regular interval to keep Janus from closing
+            // our session.
+            await Task.Delay(JANUS_KEEPALIVE_MESSAGE_INTERVAL, cancellationToken);
+            var keepAliveMessage = new JanusMessage()
+            {
+                Command = "keepalive",
+                SessionId = sessionId,
+            };
+            _logger.LogInformation("Sending Janus keepalive for session ID '{}'...",
+                sessionId);
+            await webSocket.SendJsonAsync(keepAliveMessage, cancellationToken);
+        }
+    }
+
+    private async Task ProcessTaskQueueAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var task = await _taskQueue.Reader.ReadAsync(cancellationToken);
+            await task.Invoke();
+        }
+    }
+
+    [JsonPolymorphic(TypeDiscriminatorPropertyName = "janus",
+        IgnoreUnrecognizedTypeDiscriminators = true)]
+    [JsonDerivedType(typeof(JanusCreateMessage), "create")]
     private class JanusMessage
     {
         [JsonPropertyName("janus")]
@@ -105,20 +167,17 @@ public class JanusServerBackgroundService : BackgroundService
 
         [JsonPropertyName("transaction")]
         public string TransactionId { get; set; } = Path.GetRandomFileName();
-    }
 
-    private class JanusSessionMessage : JanusMessage
-    {
         [JsonPropertyName("session_id")]
-        public long SessionId { get; set; } = default!;
+        public long? SessionId { get; set; } = null;
     }
 
-    private class JanusCreateResponse : JanusMessage
+    private class JanusCreateMessage : JanusMessage
     {
         [JsonPropertyName("data")]
-        public JanusCreateResponseData Data { get; set; } = default!;
+        public JanusCreateMessageData Data { get; set; } = default!;
 
-        public class JanusCreateResponseData
+        public class JanusCreateMessageData
         {
             [JsonPropertyName("id")]
             public long Id { get; set; }
