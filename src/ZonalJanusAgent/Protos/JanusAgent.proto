@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+option csharp_namespace = "ZonalJanusAgent";
+
+package zonaltv;
+
+service JanusAgent {
+    rpc StartStream (StartStreamRequest) returns (StartStreamResponse);
+    rpc StopStream (StopStreamRequest) returns (StopStreamResponse);
+}
+
+message StartStreamRequest {
+    uint64 channel_id = 1;
+    string sdp = 2;
+}
+
+message StartStreamResponse {
+    string sdp = 1;
+}
+
+message StopStreamRequest {
+    uint64 channel_id = 1;
+}
+
+message StopStreamResponse {
+
+}

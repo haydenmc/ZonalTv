@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>dotnet-ZonalJanusAgent-bc3730e4-09b5-43a3-9415-30bef7136729</UserSecretsId>
+  </PropertyGroup>
+
+  <!-- protobuf definitions -->
+  <ItemGroup>
+    <Protobuf Include="Protos/JanusAgent.proto" GrpcServices="Server" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.57.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0-rc.1.23419.4" />
+  </ItemGroup>
+</Project>
