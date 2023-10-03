@@ -1,7 +1,11 @@
+using System.Net.Sockets;
+using Grpc.Net.Client;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using ZonalJanusAgent;
 using ZonalTv.Data;
 using ZonalTv.Services;
+using ZonalTv.Utility;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -37,12 +41,7 @@ builder.Services.Configure<IdentityOptions>(options =>
 });
 
 builder.Services.AddMvc();
-
-builder.Services.AddHostedService<JanusServerBackgroundService>();
-builder.Services.Configure<JanusServerSettings>(options =>
-{
-    options.WebsocketUri = new Uri("ws://127.0.0.1:8188");
-});
+builder.Services.AddSingleton<IMediaServer, JanusMediaServer>();
 
 var app = builder.Build();
 
