@@ -18,6 +18,10 @@ public class JanusWebsocketClientService : BackgroundService, IJanusClient
     private readonly ILogger<JanusWebsocketClientService> _logger;
     private readonly IOptions<JanusWebsocketClientServiceSettings> _options;
 
+    private readonly List<JanusSession> _sessions = new();
+    private readonly Dictionary<string, TaskCompletionSource<JanusMessage>>
+        _outstandingRequests = new();
+
 
     public JanusWebsocketClientService(ILogger<JanusWebsocketClientService> logger,
         IOptions<JanusWebsocketClientServiceSettings> options)
@@ -35,6 +39,8 @@ public class JanusWebsocketClientService : BackgroundService, IJanusClient
             try
             {
                 var mainSessionId = await ConnectToJanusAsync(ws, _options.Value.WebsocketUri,
+                    cancellationToken);
+                var pluginHandleId = await AttachToJanusVideoRoomPluginAsync(ws, mainSessionId,
                     cancellationToken);
 
                 // Start processing incoming messages and sending keepalive messages
@@ -109,7 +115,7 @@ public class JanusWebsocketClientService : BackgroundService, IJanusClient
         webSocket.Options.AddSubProtocol("janus-protocol");
         await webSocket.ConnectAsync(webSocketUri, cancellationToken);
 
-        // Get a session id
+        // Start a 'main' session
         _logger.LogInformation("Connected to Janus, creating main session...");
         var infoRequest = new JanusCreateMessage();
         await webSocket.SendJsonAsync(infoRequest, cancellationToken);
@@ -127,11 +133,66 @@ public class JanusWebsocketClientService : BackgroundService, IJanusClient
         return sessionId;
     }
 
+    private async Task<JanusSession> CreateJanusSession(ClientWebSocket webSocket,
+        CancellationToken cancellationToken)
+    {
+        var infoRequest = new JanusCreateMessage();
+        var requestCompletion = new TaskCompletionSource<JanusMessage>();
+        _outstandingRequests.Add(infoRequest.TransactionId, requestCompletion);
+        await webSocket.SendJsonAsync(infoRequest, cancellationToken);
+
+        var response = await requestCompletion.Task;
+        if ((response == null) ||
+            (response.TransactionId != response.TransactionId) ||
+            !(response is JanusCreateMessage))
+        {
+            _logger.LogError("Invalid response when requesting Janus session ID.");
+            throw new ApplicationException("Invalid response when requesting Janus session ID.");
+        }
+        var sessionId = (response as JanusCreateMessage).Data.Id;
+        var result = new JanusSession(sessionId);
+        _logger.LogInformation("Created new Janus session, ID '{}'.", sessionId);
+        return result;
+    }
+
+    private async Task AttachToJanusVideoRoomPluginAsync(ClientWebSocket webSocket,
+        JanusSession session, CancellationToken cancellationToken)
+    {
+        var attachRequest = new JanusAttachMessage()
+        {
+            PluginPackageName = "janus.plugin.videoroom",
+            SessionId = session.SessionId,
+        };
+        var requestCompletion = new TaskCompletionSource<JanusMessage>();
+        _outstandingRequests.Add(attachRequest.TransactionId, requestCompletion);
+        await webSocket.SendJsonAsync(attachRequest, cancellationToken);
+        var attachResponse = await requestCompletion.Task;
+        if ((attachResponse == null) ||
+            (attachResponse.TransactionId != attachRequest.TransactionId) ||
+            !(attachResponse is JanusSuccessMessage))
+        {
+            _logger.LogError("Invalid response when attaching to Janus videoroom plugin.");
+            throw new ApplicationException("Invalid response when attaching to Janus videoroom plugin.");
+        }
+    }
+
+    private class JanusSession
+    {
+        public readonly ulong SessionId;
+
+        public JanusSession(ulong sessionId)
+        {
+            SessionId = sessionId;
+        }
+    }
+
     [JsonPolymorphic(TypeDiscriminatorPropertyName = "janus",
         IgnoreUnrecognizedTypeDiscriminators = true)]
     [JsonDerivedType(typeof(JanusCreateMessage), "create")]
     [JsonDerivedType(typeof(JanusKeepAliveMessage), "keepalive")]
     [JsonDerivedType(typeof(JanusAckMessage), "ack")]
+    [JsonDerivedType(typeof(JanusAttachMessage), "attach")]
+    [JsonDerivedType(typeof(JanusSuccessMessage), "success")]
     private class JanusMessage
     {
         [JsonPropertyName("janus")]
@@ -162,6 +223,28 @@ public class JanusWebsocketClientService : BackgroundService, IJanusClient
         public JanusCreateMessageData Data { get; set; } = default!;
 
         public class JanusCreateMessageData
+        {
+            [JsonPropertyName("id")]
+            public ulong Id { get; set; }
+        }
+    }
+
+    private class JanusAttachMessage : JanusMessage
+    {
+        public override string Command { get; set; } = "attach";
+
+        [JsonPropertyName("plugin")]
+        public string PluginPackageName { get; set; } = default!;
+    }
+
+    private class JanusSuccessMessage : JanusMessage
+    {
+        public override string Command { get; set; } = "success";
+
+        [JsonPropertyName("data")]
+        public JanusSuccessMessageData Data { get; set; } = default!;
+
+        public class JanusSuccessMessageData
         {
             [JsonPropertyName("id")]
             public ulong Id { get; set; }
