@@ -136,7 +136,7 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         _logger.LogInformation("Shutdown complete");
     }
 
-    private void HandleIncomingJanusMessage(JanusMessage message)
+    private void HandleIncomingJanusMessage(JsonNode message)
     {
         if (_outstandingRequests.TryGetValue(message.TransactionId,
             out TaskCompletionSource<JanusMessage>? value))
@@ -147,7 +147,7 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         }
     }
 
-    private Task<JanusMessage> SendJanusRequestAsync(JanusMessage message)
+    private Task<JanusMessage> SendJanusRequestAsync(JsonNode message)
     {
         _logger.LogDebug("Posting message with transaction id '{}' for sending to Janus...",
             message.TransactionId);

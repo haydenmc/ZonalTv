@@ -5,6 +5,10 @@ namespace ZonalJanusAgent.Services;
 
 public partial class JanusWebsocketClientService
 {
+    private class JanusJsonMessage : JsonNode
+    {
+        
+    }
     private class JanusSession(ulong sessionId)
     {
         public readonly ulong SessionId = sessionId;
