@@ -1,9 +1,7 @@
 using Microsoft.Extensions.Options;
 using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using System.Threading.Channels;
+using System.Threading.Tasks.Dataflow;
+using ZonalJanusAgent.Utility;
 
 namespace ZonalJanusAgent.Services;
 
@@ -12,23 +10,20 @@ public class JanusWebsocketClientServiceSettings
     public Uri WebsocketUri { get; set; } = default!;
 }
 
-public class JanusWebsocketClientService : BackgroundService, IJanusClient
+public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientService> logger,
+    IOptions<JanusWebsocketClientServiceSettings> options) : BackgroundService, IJanusClient
 {
     private static readonly TimeSpan JANUS_KEEPALIVE_MESSAGE_INTERVAL = new(0, 0, 5);
-    private readonly ILogger<JanusWebsocketClientService> _logger;
-    private readonly IOptions<JanusWebsocketClientServiceSettings> _options;
+    private readonly ILogger<JanusWebsocketClientService> _logger = logger;
+    private readonly IOptions<JanusWebsocketClientServiceSettings> _options = options;
 
-    private readonly List<JanusSession> _sessions = new();
+    private readonly Dictionary<ulong, JanusSession> _sessions = [];
+
+    private readonly BufferBlock<(JanusMessage message,
+        TaskCompletionSource<JanusMessage> responseCompletionSource)> _outgoingMessageQueue = new();
+
     private readonly Dictionary<string, TaskCompletionSource<JanusMessage>>
-        _outstandingRequests = new();
-
-
-    public JanusWebsocketClientService(ILogger<JanusWebsocketClientService> logger,
-        IOptions<JanusWebsocketClientServiceSettings> options)
-    {
-        _logger = logger;
-        _options = options;
-    }
+        _outstandingRequests = [];
 
     protected override async Task ExecuteAsync(CancellationToken cancellationToken)
     {
@@ -38,41 +33,75 @@ public class JanusWebsocketClientService : BackgroundService, IJanusClient
             using ClientWebSocket ws = new();
             try
             {
-                var mainSessionId = await ConnectToJanusAsync(ws, _options.Value.WebsocketUri,
-                    cancellationToken);
-                var pluginHandleId = await AttachToJanusVideoRoomPluginAsync(ws, mainSessionId,
-                    cancellationToken);
+                // Open connection
+                _logger.LogInformation("Connecting to Janus at {}...",
+                    _options.Value.WebsocketUri.ToString());
+                ws.Options.AddSubProtocol("janus-protocol");
+                await ws.ConnectAsync(_options.Value.WebsocketUri, cancellationToken);
+                _logger.LogInformation("Connected to Janus.");
 
-                // Start processing incoming messages and sending keepalive messages
-                var incomingMessageTask = ws.ReadJsonAndDeserializeAsync<JanusMessage>(
-                    cancellationToken);
-                var keepAliveTask = Task.Delay(JANUS_KEEPALIVE_MESSAGE_INTERVAL, cancellationToken);
-                while (true)
-                {
-                    var completedTask = await Task.WhenAny(incomingMessageTask, keepAliveTask);
-                    if (completedTask == incomingMessageTask)
+                // Start message loop
+                _logger.LogInformation("Starting message loop...");
+                // Handles incoming messages from Janus
+                var incomingMessageTask = Task.Run(async () =>
                     {
-                        var message = await incomingMessageTask;
-                        if (message != null)
+                        while (true)
                         {
-                            _logger.LogInformation("Received '{}' message", message.GetType().Name);
-                            incomingMessageTask = ws.ReadJsonAndDeserializeAsync<JanusMessage>(
+                            var message = await ws.ReadJsonAndDeserializeAsync<JanusMessage>(
                                 cancellationToken);
+                            if (message != null)
+                            {
+                                // handle the message
+                                HandleIncomingJanusMessage(message);
+                            }
                         }
-                    }
-                    else if (completedTask == keepAliveTask)
+                    }, cancellationToken);
+
+                // Handles sending messages to Janus
+                var outgoingMessageTask = Task.Run(async () =>
                     {
-                        var keepAliveMessage = new JanusKeepAliveMessage()
+                        while (true)
                         {
-                            SessionId = mainSessionId,
-                        };
-                        _logger.LogInformation("Sending Janus keepalive for session ID '{}'...",
-                            mainSessionId);
-                        await ws.SendJsonAsync(keepAliveMessage, cancellationToken);
-                        keepAliveTask = Task.Delay(JANUS_KEEPALIVE_MESSAGE_INTERVAL,
-                            cancellationToken);
-                    }
-                }
+                            var (message, responseCompletionSource) =
+                                await _outgoingMessageQueue.ReceiveAsync(cancellationToken);
+                            _logger.LogDebug("Sending message with transaction id '{}' to Janus...",
+                                message.TransactionId);
+                            if (_outstandingRequests.ContainsKey(message.TransactionId))
+                            {
+                                _logger.LogError(
+                                    "Duplicate transaction id '{}' when sending Janus message",
+                                    message.TransactionId);
+                                throw new ArgumentException("This transaction ID already exists.");
+                            }
+                            _outstandingRequests.Add(message.TransactionId,
+                                responseCompletionSource);
+                            await ws.SendJsonAsync(message, cancellationToken);
+                        }
+                    }, cancellationToken);
+
+                // Handles sending a periodic keep-alive message to Janus as required
+                // by the Janus websockets API
+                var keepAliveTask = Task.Run(async () => {
+                        while (true)
+                        {
+                            await Task.Delay(JANUS_KEEPALIVE_MESSAGE_INTERVAL, cancellationToken);
+                            foreach (var session in _sessions.Values)
+                            {
+                                var keepAliveMessage = new JanusKeepAliveMessage()
+                                    {
+                                        SessionId = session.SessionId,
+                                    };
+                                await ws.SendJsonAsync(keepAliveMessage, cancellationToken);
+                            }
+                        }
+                    }, cancellationToken);
+
+                // These tasks should run continuously until cancellation or exception
+                var completedTask = await Task.WhenAny(incomingMessageTask, outgoingMessageTask,
+                    keepAliveTask);
+
+                // TODO handle completion
+                _logger.LogError("A Janus message loop task ended unexpectedly.");
             }
             catch (OperationCanceledException)
             {
@@ -107,192 +136,123 @@ public class JanusWebsocketClientService : BackgroundService, IJanusClient
         _logger.LogInformation("Shutdown complete");
     }
 
-    private async Task<ulong> ConnectToJanusAsync(ClientWebSocket webSocket, Uri webSocketUri,
-        CancellationToken cancellationToken)
+    private void HandleIncomingJanusMessage(JanusMessage message)
     {
-        // Open connection
-        _logger.LogInformation("Connecting to Janus at {}...", webSocketUri.ToString());
-        webSocket.Options.AddSubProtocol("janus-protocol");
-        await webSocket.ConnectAsync(webSocketUri, cancellationToken);
-
-        // Start a 'main' session
-        _logger.LogInformation("Connected to Janus, creating main session...");
-        var infoRequest = new JanusCreateMessage();
-        await webSocket.SendJsonAsync(infoRequest, cancellationToken);
-        var infoResponse = await webSocket.ReadJsonAndDeserializeAsync<JanusCreateMessage>(
-            cancellationToken);
-        if ((infoResponse == null) ||
-            (infoResponse.TransactionId != infoRequest.TransactionId))
+        if (_outstandingRequests.TryGetValue(message.TransactionId,
+            out TaskCompletionSource<JanusMessage>? value))
         {
-            _logger.LogError("Invalid response when requesting Janus session ID.");
-            throw new ApplicationException("Invalid response when requesting Janus session ID.");
+            _logger.LogDebug("Received response message to transaction '{}'",
+                message.TransactionId);
+            value?.SetResult(message);
         }
-        var sessionId = infoResponse.Data.Id;
-        _logger.LogInformation("Received Janus session ID '{}'.", sessionId);
-
-        return sessionId;
     }
 
-    private async Task<JanusSession> CreateJanusSession(ClientWebSocket webSocket,
-        CancellationToken cancellationToken)
+    private Task<JanusMessage> SendJanusRequestAsync(JanusMessage message)
+    {
+        _logger.LogDebug("Posting message with transaction id '{}' for sending to Janus...",
+            message.TransactionId);
+        var completionSource = new TaskCompletionSource<JanusMessage>();
+        _outgoingMessageQueue.Post((message, completionSource));
+        return completionSource.Task;
+    }
+
+    private async Task<JanusSession> CreateJanusSessionAsync()
     {
         var infoRequest = new JanusCreateMessage();
-        var requestCompletion = new TaskCompletionSource<JanusMessage>();
-        _outstandingRequests.Add(infoRequest.TransactionId, requestCompletion);
-        await webSocket.SendJsonAsync(infoRequest, cancellationToken);
-
-        var response = await requestCompletion.Task;
+        var response = await SendJanusRequestAsync(infoRequest);
         if ((response == null) ||
             (response.TransactionId != response.TransactionId) ||
-            !(response is JanusCreateMessage))
+            !(response is JanusSuccessMessage))
         {
             _logger.LogError("Invalid response when requesting Janus session ID.");
             throw new ApplicationException("Invalid response when requesting Janus session ID.");
         }
-        var sessionId = (response as JanusCreateMessage).Data.Id;
+        var sessionId = (response as JanusSuccessMessage).Data.Id;
         var result = new JanusSession(sessionId);
         _logger.LogInformation("Created new Janus session, ID '{}'.", sessionId);
         return result;
     }
 
-    private async Task AttachToJanusVideoRoomPluginAsync(ClientWebSocket webSocket,
-        JanusSession session, CancellationToken cancellationToken)
+    private async Task AttachToJanusVideoRoomPluginAsync(JanusSession session)
     {
         var attachRequest = new JanusAttachMessage()
         {
             PluginPackageName = "janus.plugin.videoroom",
             SessionId = session.SessionId,
         };
-        var requestCompletion = new TaskCompletionSource<JanusMessage>();
-        _outstandingRequests.Add(attachRequest.TransactionId, requestCompletion);
-        await webSocket.SendJsonAsync(attachRequest, cancellationToken);
-        var attachResponse = await requestCompletion.Task;
+        var attachResponse = await SendJanusRequestAsync(attachRequest);
         if ((attachResponse == null) ||
             (attachResponse.TransactionId != attachRequest.TransactionId) ||
             !(attachResponse is JanusSuccessMessage))
         {
             _logger.LogError("Invalid response when attaching to Janus videoroom plugin.");
-            throw new ApplicationException("Invalid response when attaching to Janus videoroom plugin.");
+            throw new ApplicationException(
+                "Invalid response when attaching to Janus videoroom plugin.");
         }
+        session.VideoRoomHandle = (attachResponse as JanusSuccessMessage).Data.Id;
     }
 
-    private class JanusSession
+    private async Task<bool> DoesJanusVideoRoomExistAsync(JanusSession session, ulong roomId)
     {
-        public readonly ulong SessionId;
-
-        public JanusSession(ulong sessionId)
+        var request = new JanusPluginMessage()
+            {
+                SessionId = session.SessionId,
+                PluginHandleId = session.VideoRoomHandle,
+                Body = new JanusVideoRoomPluginExistsRequestMessageBody()
+                    {
+                        RoomId = roomId
+                    },
+            };
+        var response = await SendJanusRequestAsync(request);
+        if ((response == null) ||
+            (response.TransactionId != request.TransactionId) ||
+            !(response is JanusPluginMessage) ||
+            !((response as JanusPluginMessage).Body is
+                JanusVideoRoomPluginResponseSuccessMessageBody))
         {
-            SessionId = sessionId;
+            _logger.LogError("Invalid response when attaching to Janus videoroom plugin.");
+            throw new ApplicationException(
+                "Invalid response when attaching to Janus videoroom plugin.");
         }
-    }
 
-    [JsonPolymorphic(TypeDiscriminatorPropertyName = "janus",
-        IgnoreUnrecognizedTypeDiscriminators = true)]
-    [JsonDerivedType(typeof(JanusCreateMessage), "create")]
-    [JsonDerivedType(typeof(JanusKeepAliveMessage), "keepalive")]
-    [JsonDerivedType(typeof(JanusAckMessage), "ack")]
-    [JsonDerivedType(typeof(JanusAttachMessage), "attach")]
-    [JsonDerivedType(typeof(JanusSuccessMessage), "success")]
-    private class JanusMessage
-    {
-        [JsonPropertyName("janus")]
-        public virtual string Command { get; set; } = default!;
-
-        [JsonPropertyName("transaction")]
-        public string TransactionId { get; set; } = Path.GetRandomFileName();
-
-        [JsonPropertyName("session_id")]
-        public ulong? SessionId { get; set; } = null;
-    }
-
-    private class JanusKeepAliveMessage : JanusMessage
-    {
-        public override string Command { get; set; } = "keepalive";
-    }
-
-    private class JanusAckMessage : JanusMessage
-    {
-        public override string Command { get; set; } = "ack";
-    }
-
-    private class JanusCreateMessage : JanusMessage
-    {
-        public override string Command { get; set; } = "create";
-
-        [JsonPropertyName("data")]
-        public JanusCreateMessageData Data { get; set; } = default!;
-
-        public class JanusCreateMessageData
-        {
-            [JsonPropertyName("id")]
-            public ulong Id { get; set; }
-        }
-    }
-
-    private class JanusAttachMessage : JanusMessage
-    {
-        public override string Command { get; set; } = "attach";
-
-        [JsonPropertyName("plugin")]
-        public string PluginPackageName { get; set; } = default!;
-    }
-
-    private class JanusSuccessMessage : JanusMessage
-    {
-        public override string Command { get; set; } = "success";
-
-        [JsonPropertyName("data")]
-        public JanusSuccessMessageData Data { get; set; } = default!;
-
-        public class JanusSuccessMessageData
-        {
-            [JsonPropertyName("id")]
-            public ulong Id { get; set; }
-        }
+        return ((response as JanusPluginMessage).Body as
+            JanusVideoRoomPluginResponseSuccessMessageBody).Exists;
     }
 
 #region IJanusClient
-    public Task<string> StartStream(ulong channelId, string sdp)
+    public async Task<string> StartStreamAsync(ulong channelId, string sdp)
     {
+        _logger.LogInformation("Start stream requested for channel '{}'", channelId);
+
+        // 1. Find or create Janus session
+        if (!_sessions.TryGetValue(channelId, out JanusSession session))
+        {
+            session = await CreateJanusSessionAsync();
+            _sessions[channelId] = session;
+            _logger.LogInformation("Created session '{}' for channel '{}'", session.SessionId,
+                channelId);
+        }
+
+        // 2. Attach session to videoroom plugin
+        await AttachToJanusVideoRoomPluginAsync(session);
+        _logger.LogInformation("Attached session '{}' to videoroom plugin with handle '{}'",
+            session.SessionId, session.VideoRoomHandle);
+
+        // 3. Find or create room
+        var roomExists = await DoesJanusVideoRoomExistAsync(session, channelId);
+        if (!roomExists)
+        {
+            // Create room
+        }
+
+        // 4. Join and configure room
+        // 5. Publish
         throw new NotImplementedException();
     }
 
-    public Task StopStream(ulong channelId)
+    public Task StopStreamAsync(ulong channelId)
     {
         throw new NotImplementedException();
     }
 #endregion IJanusClient
-}
-
-internal static class WebsocketClientExtensions
-{
-    public static Task SendStringAsync(this ClientWebSocket ws, string content,
-        CancellationToken cancellationToken)
-    {
-        var bytes = Encoding.UTF8.GetBytes(content);
-        return ws.SendAsync(new ArraySegment<byte>(bytes, 0, bytes.Length),
-            WebSocketMessageType.Text, true, cancellationToken);
-    }
-
-    public static Task SendJsonAsync(this ClientWebSocket ws, object content,
-        CancellationToken cancellationToken)
-    {
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(content);
-        return ws.SendAsync(new ArraySegment<byte>(bytes, 0, bytes.Length),
-            WebSocketMessageType.Text, true, cancellationToken);
-    }
-
-    public async static Task<T?> ReadJsonAndDeserializeAsync<T>(this ClientWebSocket ws,
-        CancellationToken cancellationToken)
-    {
-        ArraySegment<byte> buffer = new(new byte[8192]);
-        var result = await ws.ReceiveAsync(buffer, cancellationToken);
-        if ((result.MessageType != WebSocketMessageType.Text) ||
-            !result.EndOfMessage || (buffer.Array == null))
-        {
-            throw new ApplicationException("Received unexpected websocket message type from Janus");
-        }
-        var messageString = Encoding.UTF8.GetString(buffer.Array, 0, result.Count);
-        return JsonSerializer.Deserialize<T>(messageString);
-    }
 }

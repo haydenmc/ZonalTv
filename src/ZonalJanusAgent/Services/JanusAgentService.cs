@@ -17,7 +17,7 @@ public class JanusAgentService : JanusAgent.JanusAgentBase
     public override async Task<StartStreamResponse> StartStream(StartStreamRequest request,
         ServerCallContext context)
     {
-        var sdp = await _janusClient.StartStream(request.ChannelId, request.Sdp);
+        var sdp = await _janusClient.StartStreamAsync(request.ChannelId, request.Sdp);
         return new StartStreamResponse() {
             Sdp = sdp
         };
