@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace ZonalJanusAgent.Utility;
 
@@ -20,6 +21,19 @@ internal static class WebsocketClientExtensions
         var bytes = JsonSerializer.SerializeToUtf8Bytes(content);
         return ws.SendAsync(new ArraySegment<byte>(bytes, 0, bytes.Length),
             WebSocketMessageType.Text, true, cancellationToken);
+    }
+
+    public async static Task<JsonNode?> ReadJsonAndDeserializeAsync(this ClientWebSocket ws,
+        CancellationToken cancellationToken)
+    {
+        ArraySegment<byte> buffer = new(new byte[8192]);
+        var result = await ws.ReceiveAsync(buffer, cancellationToken);
+        if ((result.MessageType != WebSocketMessageType.Text) ||
+            !result.EndOfMessage || (buffer.Array == null))
+        {
+            throw new ApplicationException("Received unexpected websocket message type from Janus");
+        }
+        return JsonNode.Parse(Encoding.UTF8.GetString(buffer.Array, 0, result.Count));
     }
 
     public async static Task<T?> ReadJsonAndDeserializeAsync<T>(this ClientWebSocket ws,

@@ -1,7 +1,10 @@
 using System.ComponentModel;
 using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using ZonalTv.Services;
+using ZonalTv.Utility;
 
 namespace ZonalTv.Controllers;
 
@@ -20,6 +23,7 @@ public class IngestController : Controller
     [Route("/ingest")]
     public async Task<IActionResult> StartStream()
     {
+        ulong channelId = 1;
         var sdp = await new StreamReader(Request.Body).ReadToEndAsync();
         // TODO authenticate stream, verify content type is application/sdp, verify body is valid SDP...
         if (sdp == null)
@@ -29,10 +33,8 @@ public class IngestController : Controller
 
         try
         {
-            var startResult = await _mediaServer.StartStreamAsync(1ul, sdp);
-            var result = Content(startResult, "application/sdp");
-            result.StatusCode = (int)HttpStatusCode.Created;
-            return result;
+            var sdpAnswer = await _mediaServer.StartStreamAsync(channelId, sdp);
+            return new WhipActionResult(sdpAnswer, $"/ingest/{channelId}");
         }
         catch (Exception e)
         {
