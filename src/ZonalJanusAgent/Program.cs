@@ -31,7 +31,9 @@ builder.Services.Configure<JanusWebsocketClientServiceSettings>(options =>
 builder.Services.AddGrpc(options => options.Interceptors.Add<ExceptionInterceptor>());
 
 var host = builder.Build();
-
 host.MapGrpcService<JanusAgentService>();
-
+if (File.Exists(socketPath))
+{
+    File.Delete(socketPath);
+}
 host.Run();
