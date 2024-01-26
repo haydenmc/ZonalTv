@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using ZonalJanusAgent;
 using ZonalJanusAgent.Services;
+using ZonalJanusAgent.Utility;
 
 var socketPath = Path.Combine(Path.GetTempPath(), "zonal-janus-agent.socket");
 
@@ -27,7 +28,7 @@ builder.Services.Configure<JanusWebsocketClientServiceSettings>(options =>
 });
 
 // Add JanusAgent gRPC service
-builder.Services.AddGrpc();
+builder.Services.AddGrpc(options => options.Interceptors.Add<ExceptionInterceptor>());
 
 var host = builder.Build();
 

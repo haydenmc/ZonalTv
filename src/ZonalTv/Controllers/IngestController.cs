@@ -8,16 +8,11 @@ using ZonalTv.Utility;
 
 namespace ZonalTv.Controllers;
 
-public class IngestController : Controller
+public class IngestController(ILogger<IngestController> logger, IMediaServer mediaServer) :
+    Controller
 {
-    private readonly ILogger<IngestController> _logger;
-    private readonly IMediaServer _mediaServer;
-
-    public IngestController(ILogger<IngestController> logger, IMediaServer mediaServer)
-    {
-        _logger = logger;
-        _mediaServer = mediaServer;
-    }
+    private readonly ILogger<IngestController> _logger = logger;
+    private readonly IMediaServer _mediaServer = mediaServer;
 
     [HttpPost]
     [Route("/ingest")]
@@ -41,5 +36,13 @@ public class IngestController : Controller
             _logger.LogError("Janus Agent StartStream error: '{}'", e.Message);
             return StatusCode(500, "Could not start stream");
         }
+    }
+
+    [HttpDelete]
+    [Route("/ingest/{id}")]
+    public async Task<IActionResult> StopStream(ulong id)
+    {
+        await _mediaServer.StopStreamAsync(id);
+        return Ok();
     }
 }

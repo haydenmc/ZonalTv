@@ -2,17 +2,12 @@ using Grpc.Core;
 
 namespace ZonalJanusAgent.Services;
 
-public class JanusAgentService : JanusAgent.JanusAgentBase
+public class JanusAgentService(ILogger<JanusAgentService> logger, IJanusClient janusClient) :
+    JanusAgent.JanusAgentBase
 {
-    private readonly ILogger<JanusAgentService> _logger;
+    private readonly ILogger<JanusAgentService> _logger = logger;
     
-    private IJanusClient _janusClient;
-
-    public JanusAgentService(ILogger<JanusAgentService> logger, IJanusClient janusClient)
-    {
-        _logger = logger;
-        _janusClient = janusClient;
-    }
+    private readonly IJanusClient _janusClient = janusClient;
 
     public override async Task<StartStreamResponse> StartStream(StartStreamRequest request,
         ServerCallContext context)
@@ -21,5 +16,12 @@ public class JanusAgentService : JanusAgent.JanusAgentBase
         return new StartStreamResponse() {
             Sdp = sdp
         };
+    }
+
+    public override async Task<StopStreamResponse> StopStream(StopStreamRequest request,
+        ServerCallContext context)
+    {
+        await _janusClient.StopStreamAsync(request.ChannelId);
+        return new StopStreamResponse();
     }
 }
