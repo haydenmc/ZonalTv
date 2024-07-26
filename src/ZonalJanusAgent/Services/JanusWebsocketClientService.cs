@@ -13,13 +13,13 @@ public class JanusWebsocketClientServiceSettings
 }
 
 public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientService> logger,
-    IOptions<JanusWebsocketClientServiceSettings> options) : BackgroundService, IJanusClient
+    IOptions<JanusWebsocketClientServiceSettings> options) : BackgroundService
 {
     private static readonly TimeSpan JANUS_KEEPALIVE_MESSAGE_INTERVAL = new(0, 0, 5);
     private readonly ILogger<JanusWebsocketClientService> _logger = logger;
     private readonly IOptions<JanusWebsocketClientServiceSettings> _options = options;
 
-    private readonly Dictionary<ulong, JanusSession> _sessions = [];
+    private readonly HashSet<ulong> _sessions = [];
 
     private readonly BufferBlock<(JsonObject message,
         TaskCompletionSource<JsonObject>? responseCompletionSource)> _outgoingMessageQueue = new();
@@ -93,10 +93,10 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
                         while (true)
                         {
                             await Task.Delay(JANUS_KEEPALIVE_MESSAGE_INTERVAL, cancellationToken);
-                            foreach (var session in _sessions.Values)
+                            foreach (var sessionId in _sessions)
                             {
                                 var keepAliveMessage = JanusMessages.MakeJanusRequestMessage(
-                                    "keepalive", session.SessionId);
+                                    "keepalive", sessionId);
                                 // Fire and forget
                                 SendJanusRequestWithoutResponse(keepAliveMessage);
                             }
@@ -184,7 +184,7 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         return completionSource.Task;
     }
 
-    private async Task<JanusSession> CreateJanusSessionAsync()
+    public async Task<ulong> CreateJanusSessionAsync()
     {
         var createRequest = JanusMessages.MakeJanusRequestMessage("create");
         var response = await SendJanusRequestAsync(createRequest);
@@ -194,14 +194,14 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
             throw new ApplicationException("Received create response from Janus that did not " + 
                 $"contain a session id: {response.ToJsonString()}");
         }
-        var result = new JanusSession((ulong)sessionId);
         _logger.LogInformation("Created new Janus session, ID '{}'.", sessionId);
-        return result;
+        _sessions.Add((ulong)sessionId);
+        return (ulong)sessionId;
     }
 
-    private async Task DestroyJanusSessionAsync(JanusSession session)
+    public async Task DestroyJanusSessionAsync(ulong sessionId)
     {
-        var destroyRequest = JanusMessages.MakeJanusRequestMessage("destroy", session.SessionId);
+        var destroyRequest = JanusMessages.MakeJanusRequestMessage("destroy", sessionId);
         var response = await SendJanusRequestAsync(destroyRequest);
         var janusEvent = response["janus"]?.GetValue<string>();
         if ((janusEvent == null) || (janusEvent != "success"))
@@ -209,11 +209,15 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
             throw new ApplicationException("Received unexpected destroy response from Janus: " + 
                 $"{response.ToJsonString()}");
         }
+        if (!_sessions.Remove(sessionId))
+        {
+            _logger.LogError("Destroyed session '{}' that was unaccounted for.", sessionId);
+        }
     }
 
-    private async Task AttachToJanusVideoRoomPluginAsync(JanusSession session)
+    public async Task<ulong> AttachToJanusVideoRoomPluginAsync(ulong sessionId)
     {
-        var attachRequest = JanusMessages.MakeJanusAttachRequestMessage(session.SessionId,
+        var attachRequest = JanusMessages.MakeJanusAttachRequestMessage(sessionId,
             "janus.plugin.videoroom");
         var attachResponse = await SendJanusRequestAsync(attachRequest);
         var handleId = attachResponse["data"]?["id"]?.GetValue<ulong>();
@@ -222,13 +226,13 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
             throw new ApplicationException("Received attach response from Janus that did not " + 
                 $"contain a session id: {attachResponse.ToJsonString()}");
         }
-        session.VideoRoomHandle = (ulong)handleId;
+        return (ulong)handleId;
     }
 
-    private async Task DetachFromJanusVideoRoomPluginAsync(JanusSession session)
+    public async Task DetachFromJanusVideoRoomPluginAsync(ulong sessionId, ulong videoRoomHandle)
     {
-        var attachRequest = JanusMessages.MakeJanusDetachRequestMessage(session.SessionId,
-            session.VideoRoomHandle);
+        var attachRequest = JanusMessages.MakeJanusDetachRequestMessage(sessionId,
+            videoRoomHandle);
         var attachResponse = await SendJanusRequestAsync(attachRequest);
         var janusEvent = attachResponse["janus"]?.GetValue<string>();
         if ((janusEvent == null) || (janusEvent != "success"))
@@ -238,10 +242,11 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         }
     }
 
-    private async Task<bool> DoesJanusVideoRoomExistAsync(JanusSession session, ulong roomId)
+    public async Task<bool> DoesJanusVideoRoomExistAsync(ulong sessionId, ulong videoRoomHandle,
+        ulong roomId)
     {
-        var request = JanusMessages.MakeJanusVideoRoomExistsMessage(session.SessionId,
-            session.VideoRoomHandle, roomId);
+        var request = JanusMessages.MakeJanusVideoRoomExistsMessage(sessionId,
+            videoRoomHandle, roomId);
         var response = await SendJanusRequestAsync(request);
         if ((response["plugindata"] == null) || (response["plugindata"]!["data"] == null) ||
             (response["plugindata"]!["data"]!["videoroom"] == null) ||
@@ -254,10 +259,11 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         return response["plugindata"]!["data"]!["exists"]!.GetValue<bool>();
     }
 
-    private async Task<ulong> CreateJanusVideoRoomAsync(JanusSession session, ulong roomId)
+    public async Task<ulong> CreateJanusVideoRoomAsync(ulong sessionId, ulong videoRoomHandle,
+        ulong roomId)
     {
-        var request = JanusMessages.MakeJanusVideoRoomCreateMessage(session.SessionId,
-            session.VideoRoomHandle, roomId);
+        var request = JanusMessages.MakeJanusVideoRoomCreateMessage(sessionId,
+            videoRoomHandle, roomId);
         var response = await SendJanusRequestAsync(request);
         if ((response["plugindata"] == null) || (response["plugindata"]!["data"] == null) ||
             (response["plugindata"]!["data"]!["videoroom"] == null) ||
@@ -270,11 +276,11 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         return response["plugindata"]!["data"]!["room"]!.GetValue<ulong>();
     }
 
-    private async Task<string> JoinAndConfigureVideoRoomAsync(JanusSession session, ulong roomId,
-        string sdp)
+    public async Task<string> JoinAndConfigureVideoRoomAsync(ulong sessionId,
+        ulong videoRoomHandle, ulong roomId, string sdp)
     {
-        var request = JanusMessages.MakeJanusVideoRoomJoinAndConfigureMessage(session.SessionId,
-            session.VideoRoomHandle, roomId, sdp);
+        var request = JanusMessages.MakeJanusVideoRoomJoinAndConfigureMessage(sessionId,
+            videoRoomHandle, roomId, sdp);
         var response = await SendJanusRequestAsync(request);
         if ((response["jsep"] == null) || (response["plugindata"] == null) ||
             (response["plugindata"]!["data"] == null) ||
@@ -288,10 +294,10 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         return response["jsep"]!["sdp"]!.GetValue<string>();
     }
 
-    private async Task UnpublishVideoRoomAsync(JanusSession session)
+    public async Task UnpublishVideoRoomAsync(ulong sessionId, ulong videoRoomHandle)
     {
-        var request = JanusMessages.MakeJanusVideoRoomUnpublishMessage(session.SessionId,
-            session.VideoRoomHandle);
+        var request = JanusMessages.MakeJanusVideoRoomUnpublishMessage(sessionId,
+            videoRoomHandle);
         var response = await SendJanusRequestAsync(request);
         if ((response["plugindata"] == null) || (response["plugindata"]!["data"] == null) ||
             (response["plugindata"]!["data"]!["videoroom"] == null) ||
@@ -304,10 +310,10 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         }
     }
 
-    private async Task LeaveVideoRoomAsync(JanusSession session)
+    public async Task LeaveVideoRoomAsync(ulong sessionId, ulong videoRoomHandle)
     {
-        var request = JanusMessages.MakeJanusVideoRoomLeaveMessage(session.SessionId,
-            session.VideoRoomHandle);
+        var request = JanusMessages.MakeJanusVideoRoomLeaveMessage(sessionId,
+            videoRoomHandle);
         var response = await SendJanusRequestAsync(request);
         if ((response["plugindata"] == null) || (response["plugindata"]!["data"] == null) ||
             (response["plugindata"]!["data"]!["videoroom"] == null) ||
@@ -319,63 +325,4 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
                 $"{response.ToJsonString()}");
         }
     }
-
-#region IJanusClient
-    public async Task<string> StartStreamAsync(ulong channelId, string sdp)
-    {
-        _logger.LogInformation("Start stream requested for channel '{}' with sdp '{}'", channelId,
-            sdp);
-
-        // Find or create Janus session
-        if (!_sessions.TryGetValue(channelId, out JanusSession? session))
-        {
-            session = await CreateJanusSessionAsync();
-            _sessions[channelId] = session;
-            _logger.LogInformation("Created session '{}' for channel '{}'", session.SessionId,
-                channelId);
-        }
-
-        // Attach session to videoroom plugin
-        await AttachToJanusVideoRoomPluginAsync(session);
-        _logger.LogInformation("Attached session '{}' to videoroom plugin with handle '{}'",
-            session.SessionId, session.VideoRoomHandle);
-
-        // Find or create room
-        var roomExists = await DoesJanusVideoRoomExistAsync(session, channelId);
-        if (!roomExists)
-        {
-            _logger.LogInformation("Room '{}' does not exist, creating...", channelId);
-            await CreateJanusVideoRoomAsync(session, channelId);
-        }
-
-        // Join and publish
-        var sdpAnswer = await JoinAndConfigureVideoRoomAsync(session, channelId, sdp);
-        _logger.LogInformation("SDP answer for channel '{}': '{}'", channelId, sdpAnswer);
-
-        // TODO: Kick off existing publishers
-
-        return sdpAnswer;
-    }
-
-    public async Task StopStreamAsync(ulong channelId)
-    {
-        _logger.LogInformation("Stop stream requested for channel '{}'", channelId);
-
-        if (!_sessions.TryGetValue(channelId, out JanusSession? session))
-        {
-            _logger.LogError("Could not find Janus session for stop stream request on channel '{}'",
-                channelId);
-            throw new ArgumentException("No existing session for provided channel id.");
-        }
-
-        await UnpublishVideoRoomAsync(session);
-        await LeaveVideoRoomAsync(session);
-        _logger.LogInformation("Session '{}' has stopped publishing and left room '{}'",
-            session.SessionId, channelId);
-        await DetachFromJanusVideoRoomPluginAsync(session);
-        await DestroyJanusSessionAsync(session);
-
-        _sessions.Remove(channelId);
-    }
-#endregion IJanusClient
 }

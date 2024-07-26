@@ -62,7 +62,10 @@ public class WebSocketController(ILogger<IngestController> logger, IMediaServer 
                 await task();
             }
         }
-        catch ()
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Shutting down WebSocketController...");
+        }
 
         await Task.WhenAll(tasks);
     }

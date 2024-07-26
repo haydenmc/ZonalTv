@@ -19,8 +19,9 @@ builder.WebHost.ConfigureKestrel(serverOptions =>
 
 // Add JanusClient as a hosted service, and also as an implementation of IJanusClient
 builder.Services.AddSingleton<JanusWebsocketClientService>();
+builder.Services.AddSingleton<JanusStreamManagerService>();
 builder.Services.AddSingleton<IJanusClient>(sp =>
-    sp.GetRequiredService<JanusWebsocketClientService>());
+    sp.GetRequiredService<JanusStreamManagerService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<JanusWebsocketClientService>());
 builder.Services.Configure<JanusWebsocketClientServiceSettings>(options =>
 {
