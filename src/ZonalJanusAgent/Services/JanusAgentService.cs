@@ -24,4 +24,17 @@ public class JanusAgentService(ILogger<JanusAgentService> logger, IJanusClient j
         await _janusClient.StopStreamAsync(request.ChannelId);
         return new StopStreamResponse();
     }
+
+    public override async Task WatchStream(IAsyncStreamReader<WatchStreamRequest> requestStream,
+        IServerStreamWriter<WatchStreamResponse> responseStream, ServerCallContext context)
+    {
+        await foreach (var message in requestStream.ReadAllAsync())
+        {
+            switch (message.RequestMessageCase)
+            {
+            case WatchStreamRequest.RequestMessageOneofCase.Start:
+                break;
+            }
+        }
+    }
 }

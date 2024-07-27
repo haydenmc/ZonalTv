@@ -65,6 +65,21 @@ public partial class JanusWebsocketClientService
             return message;
         }
 
+        public static JsonObject MakeJanusVideoRoomJoinAsSubscriberMessage(ulong sessionId,
+            ulong handleId, ulong roomId, ulong publisherId)
+        {
+            var message = MakeJanusPluginMessage(sessionId, handleId);
+            message["body"]!["request"] = "join";
+            message["body"]!["ptype"] = "subscriber";
+            message["body"]!["room"] = roomId;
+            message["body"]!["streams"] = new JsonArray() {
+                new JsonObject(new List<KeyValuePair<string, JsonNode?>> {
+                    new ("feed", publisherId),
+                })
+            };
+            return message;
+        }
+
         public static JsonObject MakeJanusVideoRoomJoinAndConfigureMessage(ulong sessionId,
             ulong handleId, ulong roomId, string sdp)
         {

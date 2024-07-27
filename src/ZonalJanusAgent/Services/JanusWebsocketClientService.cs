@@ -276,8 +276,26 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         return response["plugindata"]!["data"]!["room"]!.GetValue<ulong>();
     }
 
-    public async Task<string> JoinAndConfigureVideoRoomAsync(ulong sessionId,
-        ulong videoRoomHandle, ulong roomId, string sdp)
+    public async Task<string> JoinAsSubscriberVideoRoomAsync(ulong sessionId,
+        ulong videoRoomHandle, ulong roomId, ulong publisherId)
+    {
+        var request = JanusMessages.MakeJanusVideoRoomJoinAsSubscriberMessage(sessionId,
+            videoRoomHandle, roomId, publisherId);
+        var response = await SendJanusRequestAsync(request);
+        if ((response["jsep"] == null) || (response["plugindata"] == null) ||
+            (response["plugindata"]!["data"] == null) ||
+            (response["plugindata"]!["data"]!["videoroom"] == null) ||
+            (response["plugindata"]!["data"]!["videoroom"]!.GetValue<string>() != "attached"))
+        {
+            throw new ApplicationException("Invalid response when subscribing to Janus room: " +
+                $"{response.ToJsonString()}");
+        }
+
+        return response["jsep"]!["sdp"]!.GetValue<string>();
+    }
+
+    public async Task<(string sdp, ulong publisherId)> JoinAndConfigureVideoRoomAsync(
+        ulong sessionId, ulong videoRoomHandle, ulong roomId, string sdp)
     {
         var request = JanusMessages.MakeJanusVideoRoomJoinAndConfigureMessage(sessionId,
             videoRoomHandle, roomId, sdp);
@@ -285,13 +303,16 @@ public partial class JanusWebsocketClientService(ILogger<JanusWebsocketClientSer
         if ((response["jsep"] == null) || (response["plugindata"] == null) ||
             (response["plugindata"]!["data"] == null) ||
             (response["plugindata"]!["data"]!["videoroom"] == null) ||
-            (response["plugindata"]!["data"]!["videoroom"]!.GetValue<string>() != "joined"))
+            (response["plugindata"]!["data"]!["videoroom"]!.GetValue<string>() != "joined") ||
+            (response["plugindata"]!["data"]!["id"] == null) ||
+            (response["plugindata"]!["data"]!["id"]!.GetValueKind() != JsonValueKind.Number))
         {
             throw new ApplicationException("Invalid response when creating Janus room: " +
                 $"{response.ToJsonString()}");
         }
 
-        return response["jsep"]!["sdp"]!.GetValue<string>();
+        return (sdp: response["jsep"]!["sdp"]!.GetValue<string>(),
+            publisherId: response["plugindata"]!["data"]!["id"]!.GetValue<ulong>());
     }
 
     public async Task UnpublishVideoRoomAsync(ulong sessionId, ulong videoRoomHandle)

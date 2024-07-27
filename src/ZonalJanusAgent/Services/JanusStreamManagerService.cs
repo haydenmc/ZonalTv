@@ -8,6 +8,7 @@ public partial class JanusStreamManagerService(ILogger<JanusStreamManagerService
     {
         public ulong SessionId = sessionId;
         public ulong? VideoRoomHandle;
+        public ulong? PublisherId;
     }
 
     private ILogger<JanusStreamManagerService> _logger = logger;
@@ -47,8 +48,9 @@ public partial class JanusStreamManagerService(ILogger<JanusStreamManagerService
         }
 
         // Join and publish
-        var sdpAnswer = await _janusClient.JoinAndConfigureVideoRoomAsync(streamInfo.SessionId,
-            (ulong)streamInfo.VideoRoomHandle, channelId, sdp);
+        (var sdpAnswer, var publisherId) = await _janusClient.JoinAndConfigureVideoRoomAsync(
+            streamInfo.SessionId, (ulong)streamInfo.VideoRoomHandle, channelId, sdp);
+        streamInfo.PublisherId = publisherId;
         _logger.LogInformation("SDP answer for channel '{}': '{}'", channelId, sdpAnswer);
 
         // TODO: Kick off existing publishers
@@ -86,6 +88,28 @@ public partial class JanusStreamManagerService(ILogger<JanusStreamManagerService
         _logger.LogInformation("Stopped stream and destroyed session '{}' for channel '{}'",
             streamInfo.SessionId, channelId);
         _channelStreams.Remove(channelId);
+    }
+
+    public async Task WatchStreamAsync(ulong channelId)
+    {
+        _logger.LogInformation("Watch stream requested for channel '{}'", channelId);
+
+        if (!_channelStreams.TryGetValue(channelId, out StreamInfo? streamInfo))
+        {
+            _logger.LogError("No active stream for channel '{}'", channelId);
+            throw new ArgumentException($"No active stream for channel '{channelId}'");
+        }
+
+        var sessionId = await _janusClient.CreateJanusSessionAsync();
+        var videoRoomHandle = await _janusClient.AttachToJanusVideoRoomPluginAsync(sessionId);
+        if (!exists)
+        {
+            await _janusClient.DetachFromJanusVideoRoomPluginAsync(sessionId, videoRoomHandle);
+            await _janusClient.DestroyJanusSessionAsync(sessionId);
+            _logger.LogWarning("No stream exists for channel '{}'", channelId);
+            throw new ArgumentOutOfRangeException($"No stream exists for channel '{channelId}'");
+        }
+
     }
 #endregion IJanusClient
 }
